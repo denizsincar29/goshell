@@ -7,3 +7,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.33.0
 )
+
+require (
+	github.com/ebitengine/purego v0.10.1 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+)
