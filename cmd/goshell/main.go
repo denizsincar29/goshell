@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/crgimenes/glaze"
-	_ "github.com/crgimenes/glaze/embedded"
 
 	"github.com/denizsincar29/goshell/internal/config"
 	"github.com/denizsincar29/goshell/internal/ui"
