@@ -155,6 +155,11 @@ func (s *Service) ServiceStatusDetail(name string) (string, error) {
 }
 
 // ---- Crontab ----
+//
+// GetCrontab/SetCrontab work with the raw crontab text and back the
+// advanced "raw editor" fallback. GetCronEntries/SetCronEntries are the
+// default path: they parse/serialize on the Go side (see cron.go) so the
+// JS form never has to construct or read cron's five-field syntax itself.
 
 func (s *Service) GetCrontab(user string) (string, error) {
 	c, err := s.getClient()
@@ -177,6 +182,38 @@ func (s *Service) SetCrontab(req CrontabUpdate) error {
 	}
 	_, err = c.SetCrontab(req.User, req.Content, req.UseSudo)
 	return err
+}
+
+func (s *Service) GetCronEntries(user string) ([]CronEntry, error) {
+	c, err := s.getClient()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.GetCrontab(user)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCrontab(raw), nil
+}
+
+type SetCronEntriesRequest struct {
+	User    string      `json:"user"`
+	Entries []CronEntry `json:"entries"`
+	UseSudo bool        `json:"use_sudo"`
+}
+
+func (s *Service) SetCronEntries(req SetCronEntriesRequest) error {
+	c, err := s.getClient()
+	if err != nil {
+		return err
+	}
+	content := SerializeCrontab(req.Entries)
+	_, err = c.SetCrontab(req.User, content, req.UseSudo)
+	return err
+}
+
+func (s *Service) DescribeCronSchedule(e CronEntry) string {
+	return DescribeSchedule(e)
 }
 
 // ---- Files ----

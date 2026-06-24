@@ -306,6 +306,69 @@ dialog textarea {
   gap: 10px;
 }
 
+/* ---- Crontab structured entries ---- */
+.cron-entry-list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cron-entry-btn {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  background: var(--bg-input);
+}
+.cron-entry-btn:hover { background: #242424; }
+.cron-entry-title {
+  font-weight: 600;
+}
+.cron-entry-schedule {
+  color: var(--fg-muted);
+  font-size: 0.88rem;
+}
+.inline-row {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  max-width: none;
+}
+.inline-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 200px;
+}
+.weekday-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 6px 0;
+}
+.sub-legend {
+  font-weight: 600;
+  padding: 0;
+  border: none;
+  font-size: 0.95rem;
+}
+.hint {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+  margin: 4px 0 0;
+}
+.cron-preview {
+  background: var(--bg-input);
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-weight: 600;
+}
+
 /* Respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }

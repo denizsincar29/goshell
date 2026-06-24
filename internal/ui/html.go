@@ -144,23 +144,131 @@ const indexHTML = `<!DOCTYPE html>
 
     <!-- ---- Crontab panel ---- -->
     <div role="tabpanel" id="panel-cron" aria-labelledby="tab-cron" class="tab-panel" hidden>
-      <h3 class="visually-hidden">Crontab editor</h3>
+      <h3 class="visually-hidden">Scheduled tasks (crontab)</h3>
 
       <div class="toolbar">
         <label for="cron-user">User (blank = current user)</label>
         <input type="text" id="cron-user" placeholder="current user">
-        <button type="button" id="cron-load">Load crontab</button>
-        <button type="button" id="cron-save">Save crontab</button>
+        <button type="button" id="cron-load">Load schedule</button>
         <label class="checkbox-label"><input type="checkbox" id="cron-sudo"> Use sudo</label>
       </div>
 
-      <p id="cron-help">Format: minute hour day month weekday command. Example: 30 2 * * * /usr/bin/backup.sh runs at 2:30 AM every day.</p>
-
-      <label for="cron-editor" class="visually-hidden">Crontab contents, one entry per line</label>
-      <textarea id="cron-editor" aria-describedby="cron-help" rows="20" spellcheck="false"></textarea>
-
       <p id="cron-status" role="status" aria-live="polite"></p>
+
+      <!-- ---- Structured list of entries (default view) ---- -->
+      <div id="cron-entries-view">
+        <div class="toolbar">
+          <button type="button" id="cron-add-entry" class="primary">Add a new scheduled task</button>
+          <button type="button" id="cron-save-entries" class="primary">Save all changes</button>
+          <button type="button" id="cron-switch-raw">Switch to raw text editor</button>
+        </div>
+
+        <ul id="cron-entry-list" class="cron-entry-list" aria-label="Scheduled tasks"></ul>
+        <p id="cron-empty-msg" hidden>No scheduled tasks yet. Use "Add a new scheduled task" to create one.</p>
+      </div>
+
+      <!-- ---- Raw text fallback (advanced mode) ---- -->
+      <div id="cron-raw-view" hidden>
+        <p id="cron-raw-help">
+          Each line is one scheduled task: five time fields (minute, hour, day of month,
+          month, day of week) followed by the command. A star means "any value". Lines
+          starting with # are comments and are kept as-is.
+        </p>
+        <label for="cron-editor" class="visually-hidden">Crontab contents, one entry per line</label>
+        <textarea id="cron-editor" aria-describedby="cron-raw-help" rows="20" spellcheck="false"></textarea>
+        <div class="toolbar">
+          <button type="button" id="cron-save-raw" class="primary">Save raw crontab</button>
+          <button type="button" id="cron-switch-entries">Switch to structured editor</button>
+        </div>
+      </div>
     </div>
+
+    <!-- ---- Cron entry edit dialog ---- -->
+    <dialog id="dlg-cron-entry" aria-labelledby="dlg-cron-entry-title" class="dlg-large">
+      <h2 id="dlg-cron-entry-title">Scheduled task</h2>
+      <form id="cron-entry-form">
+
+        <fieldset>
+          <legend>When should this run?</legend>
+          <div class="field-row">
+            <label for="cron-preset">Quick choice</label>
+            <select id="cron-preset">
+              <option value="custom">Custom (set fields below)</option>
+              <option value="reboot">When the server starts (@reboot)</option>
+              <option value="0 * * * *">Every hour, on the hour</option>
+              <option value="*/15 * * * *">Every 15 minutes</option>
+              <option value="*/30 * * * *">Every 30 minutes</option>
+              <option value="0 0 * * *">Every day at midnight</option>
+              <option value="0 H * * *">Every day at a time I choose</option>
+              <option value="0 H * * 1">Every Monday at a time I choose</option>
+              <option value="0 H 1 * *">First day of every month at a time I choose</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset id="cron-time-fields">
+          <legend>Time of day</legend>
+          <div class="field-row inline-row">
+            <div>
+              <label for="cron-hour">Hour (0–23, or * for every hour)</label>
+              <input type="text" id="cron-hour" value="0" inputmode="numeric">
+            </div>
+            <div>
+              <label for="cron-minute">Minute (0–59, or * for every minute)</label>
+              <input type="text" id="cron-minute" value="0" inputmode="numeric">
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset id="cron-date-fields">
+          <legend>Which days?</legend>
+          <div class="field-row">
+            <label for="cron-dom">Day of month (1–31, or * for every day)</label>
+            <input type="text" id="cron-dom" value="*">
+          </div>
+          <div class="field-row">
+            <label for="cron-month">Month (1–12, or * for every month)</label>
+            <input type="text" id="cron-month" value="*">
+          </div>
+          <div class="field-row">
+            <legend class="sub-legend">Day of week</legend>
+            <div class="weekday-checks" role="group" aria-label="Day of week">
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="1"> Mon</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="2"> Tue</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="3"> Wed</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="4"> Thu</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="5"> Fri</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="6"> Sat</label>
+              <label class="checkbox-label"><input type="checkbox" class="cron-dow" value="0"> Sun</label>
+            </div>
+            <p class="hint">Leave all days unchecked to mean "every day".</p>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>What should run?</legend>
+          <div class="field-row">
+            <label for="cron-command">Command</label>
+            <input type="text" id="cron-command" placeholder="/usr/bin/backup.sh" required>
+          </div>
+          <div class="field-row">
+            <label for="cron-comment">Description (optional, saved as a comment above the task)</label>
+            <input type="text" id="cron-comment" placeholder="e.g. Nightly database backup">
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Preview</legend>
+          <p id="cron-preview" class="cron-preview" role="status" aria-live="polite"></p>
+        </fieldset>
+
+        <div class="button-row">
+          <button type="button" data-close-dialog="dlg-cron-entry">Cancel</button>
+          <button type="button" id="cron-entry-delete" class="danger" hidden>Delete this task</button>
+          <button type="submit" class="primary">Save task</button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ---- Files panel ---- -->
     <div role="tabpanel" id="panel-files" aria-labelledby="tab-files" class="tab-panel" hidden>

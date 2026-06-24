@@ -411,26 +411,255 @@ async function viewServiceStatus() {
 }
 
 // ============== Crontab tab ==============
+//
+// Default view is a structured list of scheduled tasks built from
+// CronEntry objects the Go side parsed out of the raw crontab (see
+// internal/ui/cron.go) -- no cron syntax is typed by the user. A raw
+// text mode stays available for entries the parser can't represent and
+// for people who already know the syntax and want it directly.
+
+let cronEntries = [];
+let cronEditingId = null; // null = adding a new entry
 
 function initCronTab() {
-  $('cron-load').addEventListener('click', loadCrontab);
-  $('cron-save').addEventListener('click', saveCrontab);
+  $('cron-load').addEventListener('click', loadCronEntries);
+  $('cron-add-entry').addEventListener('click', openNewCronEntry);
+  $('cron-save-entries').addEventListener('click', saveCronEntries);
+  $('cron-switch-raw').addEventListener('click', switchToRawMode);
+  $('cron-switch-entries').addEventListener('click', switchToEntriesMode);
+  $('cron-save-raw').addEventListener('click', saveCrontabRaw);
+
+  $('cron-entry-list').addEventListener('click', function (e) {
+    const btn = e.target.closest('button[data-edit-id]');
+    if (btn) openExistingCronEntry(btn.dataset.editId);
+  });
+
+  $('cron-preset').addEventListener('change', applyCronPreset);
+  ['cron-hour', 'cron-minute', 'cron-dom', 'cron-month'].forEach(function (id) {
+    $(id).addEventListener('input', updateCronPreview);
+  });
+  document.querySelectorAll('.cron-dow').forEach(function (cb) {
+    cb.addEventListener('change', updateCronPreview);
+  });
+
+  $('cron-entry-form').addEventListener('submit', saveCronEntryFromDialog);
+  $('cron-entry-delete').addEventListener('click', deleteCronEntryFromDialog);
 }
 
-async function loadCrontab() {
+async function loadCronEntries() {
   const user = $('cron-user').value.trim();
   $('cron-status').textContent = 'Loading…';
   try {
-    $('cron-editor').value = await call('get_crontab', user);
-    $('cron-status').textContent = 'Crontab loaded';
-    announce('Crontab loaded');
+    cronEntries = await call('get_cron_entries', user) || [];
+    renderCronEntries();
+    $('cron-status').textContent = cronEntries.length + ' scheduled task(s) loaded';
+    announce(cronEntries.length + ' scheduled tasks loaded');
+    // Keep the raw view in sync too, in case the user switches over.
+    const raw = await call('get_crontab', user);
+    $('cron-editor').value = raw;
   } catch (err) {
     $('cron-status').textContent = 'Error: ' + err.message;
-    announce('Error loading crontab: ' + err.message, true);
+    announce('Error loading scheduled tasks: ' + err.message, true);
   }
 }
 
-async function saveCrontab() {
+function renderCronEntries() {
+  const list = $('cron-entry-list');
+  list.innerHTML = '';
+  const real = cronEntries.filter(function (e) { return !e.raw; });
+  $('cron-empty-msg').hidden = real.length > 0;
+
+  cronEntries.forEach(function (e) {
+    if (e.raw) return; // raw/unparsed lines aren't shown as editable tasks
+    const li = document.createElement('li');
+    li.className = 'cron-entry-item';
+
+    const desc = describeScheduleLocally(e);
+    const label = (e.comment ? e.comment + ' — ' : '') + e.command;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cron-entry-btn';
+    btn.dataset.editId = e.id;
+    btn.innerHTML =
+      '<span class="cron-entry-title">' + escapeHTML(label) + '</span>' +
+      '<span class="cron-entry-schedule">' + escapeHTML(desc) + '</span>';
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+}
+
+// Quick local description so the list renders instantly without a round
+// trip per row; the dialog's live preview uses the authoritative Go-side
+// describe_cron_schedule call instead.
+function describeScheduleLocally(e) {
+  if (e.is_reboot) return 'When the server starts';
+  if (e.minute === '*' && e.hour === '*') return 'Every minute';
+  if (e.dom === '*' && e.month === '*' && e.dow === '*') {
+    return 'Every day at ' + pad2(e.hour) + ':' + pad2(e.minute);
+  }
+  return e.minute + ' ' + e.hour + ' ' + e.dom + ' ' + e.month + ' ' + e.dow;
+}
+
+function pad2(s) {
+  if (!/^\d+$/.test(s)) return s;
+  return s.length < 2 ? '0' + s : s;
+}
+
+function openNewCronEntry() {
+  cronEditingId = null;
+  $('dlg-cron-entry-title').textContent = 'New scheduled task';
+  $('cron-entry-delete').hidden = true;
+  $('cron-preset').value = 'custom';
+  $('cron-hour').value = '0';
+  $('cron-minute').value = '0';
+  $('cron-dom').value = '*';
+  $('cron-month').value = '*';
+  document.querySelectorAll('.cron-dow').forEach(function (cb) { cb.checked = false; });
+  $('cron-command').value = '';
+  $('cron-comment').value = '';
+  setCronTimeFieldsVisible(true);
+  updateCronPreview();
+  openDialog('dlg-cron-entry');
+}
+
+function openExistingCronEntry(id) {
+  const e = cronEntries.find(function (x) { return x.id === id; });
+  if (!e) return;
+  cronEditingId = id;
+  $('dlg-cron-entry-title').textContent = 'Edit scheduled task';
+  $('cron-entry-delete').hidden = false;
+  $('cron-preset').value = 'custom';
+  $('cron-command').value = e.command || '';
+  $('cron-comment').value = e.comment || '';
+
+  if (e.is_reboot) {
+    $('cron-preset').value = 'reboot';
+    setCronTimeFieldsVisible(false);
+  } else {
+    $('cron-hour').value = e.hour || '0';
+    $('cron-minute').value = e.minute || '0';
+    $('cron-dom').value = e.dom || '*';
+    $('cron-month').value = e.month || '*';
+    document.querySelectorAll('.cron-dow').forEach(function (cb) {
+      cb.checked = (e.dow || '').split(',').indexOf(cb.value) >= 0;
+    });
+    setCronTimeFieldsVisible(true);
+  }
+  updateCronPreview();
+  openDialog('dlg-cron-entry');
+}
+
+function applyCronPreset() {
+  const val = $('cron-preset').value;
+  if (val === 'custom') { setCronTimeFieldsVisible(true); updateCronPreview(); return; }
+  if (val === 'reboot') { setCronTimeFieldsVisible(false); updateCronPreview(); return; }
+
+  setCronTimeFieldsVisible(true);
+  // Presets use "H" as a placeholder meaning "let the user's current hour field stand".
+  const parts = val.split(' ');
+  if (parts.length === 5) {
+    if (parts[0] !== 'H') $('cron-minute').value = parts[0];
+    if (parts[1] !== 'H') $('cron-hour').value = parts[1];
+    $('cron-dom').value = parts[2];
+    $('cron-month').value = parts[3];
+    document.querySelectorAll('.cron-dow').forEach(function (cb) {
+      cb.checked = parts[4] !== '*' && parts[4].split(',').indexOf(cb.value) >= 0;
+    });
+  }
+  updateCronPreview();
+}
+
+function setCronTimeFieldsVisible(visible) {
+  $('cron-time-fields').hidden = !visible;
+  $('cron-date-fields').hidden = !visible;
+}
+
+function collectCronEntryFromDialog() {
+  const isReboot = $('cron-preset').value === 'reboot';
+  const checkedDows = Array.prototype.slice.call(document.querySelectorAll('.cron-dow:checked'))
+    .map(function (cb) { return cb.value; });
+  return {
+    id: cronEditingId || '',
+    comment: $('cron-comment').value.trim(),
+    command: $('cron-command').value.trim(),
+    is_reboot: isReboot,
+    minute: isReboot ? '' : ($('cron-minute').value.trim() || '*'),
+    hour: isReboot ? '' : ($('cron-hour').value.trim() || '*'),
+    dom: isReboot ? '' : ($('cron-dom').value.trim() || '*'),
+    month: isReboot ? '' : ($('cron-month').value.trim() || '*'),
+    dow: isReboot ? '' : (checkedDows.length ? checkedDows.join(',') : '*'),
+    raw: ''
+  };
+}
+
+async function updateCronPreview() {
+  const entry = collectCronEntryFromDialog();
+  try {
+    $('cron-preview').textContent = await call('describe_cron_schedule', entry);
+  } catch (err) {
+    $('cron-preview').textContent = '';
+  }
+}
+
+function saveCronEntryFromDialog(e) {
+  e.preventDefault();
+  const entry = collectCronEntryFromDialog();
+  if (!entry.command) {
+    announce('A command is required', true);
+    $('cron-command').focus();
+    return;
+  }
+  if (cronEditingId) {
+    const idx = cronEntries.findIndex(function (x) { return x.id === cronEditingId; });
+    if (idx >= 0) cronEntries[idx] = Object.assign({}, cronEntries[idx], entry);
+  } else {
+    entry.id = 'new-' + Date.now();
+    cronEntries.push(entry);
+  }
+  renderCronEntries();
+  $('dlg-cron-entry').close();
+  announce('Task saved locally. Click "Save all changes" to write it to the server.');
+}
+
+function deleteCronEntryFromDialog() {
+  if (!cronEditingId) return;
+  cronEntries = cronEntries.filter(function (x) { return x.id !== cronEditingId; });
+  renderCronEntries();
+  $('dlg-cron-entry').close();
+  announce('Task removed locally. Click "Save all changes" to write it to the server.');
+}
+
+async function saveCronEntries() {
+  $('cron-status').textContent = 'Saving…';
+  try {
+    await call('set_cron_entries', {
+      user: $('cron-user').value.trim(),
+      entries: cronEntries,
+      use_sudo: $('cron-sudo').checked
+    });
+    $('cron-status').textContent = 'Scheduled tasks saved successfully';
+    announce('Scheduled tasks saved');
+  } catch (err) {
+    $('cron-status').textContent = 'Error: ' + err.message;
+    announce('Error saving scheduled tasks: ' + err.message, true);
+  }
+}
+
+function switchToRawMode() {
+  $('cron-entries-view').hidden = true;
+  $('cron-raw-view').hidden = false;
+  announce('Switched to raw text editor for scheduled tasks');
+  $('cron-editor').focus();
+}
+
+function switchToEntriesMode() {
+  $('cron-raw-view').hidden = true;
+  $('cron-entries-view').hidden = false;
+  announce('Switched to structured editor for scheduled tasks');
+}
+
+async function saveCrontabRaw() {
   $('cron-status').textContent = 'Saving…';
   try {
     await call('set_crontab', {
@@ -440,6 +669,9 @@ async function saveCrontab() {
     });
     $('cron-status').textContent = 'Crontab saved successfully';
     announce('Crontab saved');
+    // Re-parse so the structured view reflects the raw edit if the user switches back.
+    cronEntries = await call('get_cron_entries', $('cron-user').value.trim()) || [];
+    renderCronEntries();
   } catch (err) {
     $('cron-status').textContent = 'Error: ' + err.message;
     announce('Error saving crontab: ' + err.message, true);
