@@ -291,10 +291,10 @@ func (s *Service) Chown(req ChownRequest) (string, error) {
 	return c.Chown(req.Path, req.Owner, req.Group, req.Recursive, req.UseSudo)
 }
 
-func (s *Service) DiskUsage() (string, error) {
+func (s *Service) DiskUsage() ([]sshpkg.DiskInfo, error) {
 	c, err := s.getClient()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	return c.DiskUsage()
 }
@@ -317,10 +317,10 @@ func (s *Service) GetResources() (*sshpkg.ResourceInfo, error) {
 	return c.GetResources()
 }
 
-func (s *Service) GetProcesses() (string, error) {
+func (s *Service) GetProcesses() ([]sshpkg.ProcessInfo, error) {
 	c, err := s.getClient()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	return c.GetProcesses()
 }

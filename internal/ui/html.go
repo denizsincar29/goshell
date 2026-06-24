@@ -275,10 +275,9 @@ const indexHTML = `<!DOCTYPE html>
       <h3 class="visually-hidden">File manager</h3>
 
       <div class="toolbar">
-        <button type="button" id="files-up">Up</button>
         <button type="button" id="files-home">Home</button>
         <button type="button" id="files-root">Root /</button>
-        <label for="files-path">Current path</label>
+        <label for="files-path">Go to path</label>
         <input type="text" id="files-path" value="/">
         <button type="button" id="files-go">Go</button>
         <label class="checkbox-label"><input type="checkbox" id="files-sudo"> Use sudo</label>
@@ -289,25 +288,34 @@ const indexHTML = `<!DOCTYPE html>
         <button type="button" id="files-chmod">chmod…</button>
         <button type="button" id="files-chown">chown…</button>
         <button type="button" id="files-disk">Disk usage</button>
-        <button type="button" id="files-refresh">Refresh</button>
+        <button type="button" id="files-refresh">Refresh current folder</button>
       </div>
 
-      <div class="table-wrap">
-        <table id="files-table" aria-label="Files and directories in current path">
-          <caption class="visually-hidden">Directory listing</caption>
-          <thead>
-            <tr>
-              <th scope="col">Name</th>
-              <th scope="col">Permissions</th>
-              <th scope="col">Owner</th>
-              <th scope="col">Group</th>
-              <th scope="col">Size</th>
-              <th scope="col">Modified</th>
-            </tr>
-          </thead>
-          <tbody id="files-tbody">
-          </tbody>
-        </table>
+      <p id="files-help">
+        Use the Down and Up arrow keys to move between files and folders.
+        Right arrow opens a folder, Left arrow closes it or moves to its
+        parent. Enter on a folder opens it; Enter on a file opens the
+        editor below.
+      </p>
+
+      <div class="files-layout">
+        <div class="files-tree-wrap">
+          <ul id="files-tree" class="files-tree" role="tree" aria-label="File browser" tabindex="0"></ul>
+        </div>
+
+        <div class="files-details" aria-labelledby="files-details-heading">
+          <h4 id="files-details-heading">Selected item</h4>
+          <dl id="files-details-list" class="res-summary">
+            <dt>Name</dt><dd id="fd-name">None selected</dd>
+            <dt>Type</dt><dd id="fd-type">—</dd>
+            <dt>Permissions</dt><dd id="fd-perms">—</dd>
+            <dt>Owner</dt><dd id="fd-owner">—</dd>
+            <dt>Group</dt><dd id="fd-group">—</dd>
+            <dt>Size</dt><dd id="fd-size">—</dd>
+            <dt>Modified</dt><dd id="fd-modified">—</dd>
+            <dt>Path</dt><dd id="fd-path">—</dd>
+          </dl>
+        </div>
       </div>
 
       <p id="files-status" role="status" aria-live="polite"></p>
@@ -326,10 +334,42 @@ const indexHTML = `<!DOCTYPE html>
       <dl id="res-summary" class="res-summary"></dl>
 
       <h4 id="res-proc-heading">Top processes by CPU</h4>
-      <textarea id="res-processes" aria-labelledby="res-proc-heading" readonly rows="16"></textarea>
+      <div class="table-wrap">
+        <table id="res-proc-table" aria-label="Top processes by CPU usage">
+          <caption class="visually-hidden">Process list sorted by CPU usage, highest first</caption>
+          <thead>
+            <tr>
+              <th scope="col">User</th>
+              <th scope="col">PID</th>
+              <th scope="col">% CPU</th>
+              <th scope="col">% Memory</th>
+              <th scope="col">Status</th>
+              <th scope="col">Started</th>
+              <th scope="col">Time</th>
+              <th scope="col">Command</th>
+            </tr>
+          </thead>
+          <tbody id="res-proc-tbody"></tbody>
+        </table>
+      </div>
 
       <h4 id="res-disk-heading">Disk usage</h4>
-      <textarea id="res-disk" aria-labelledby="res-disk-heading" readonly rows="8"></textarea>
+      <div class="table-wrap">
+        <table id="res-disk-table" aria-label="Disk usage by filesystem">
+          <caption class="visually-hidden">Disk space used and available per mounted filesystem</caption>
+          <thead>
+            <tr>
+              <th scope="col">Filesystem</th>
+              <th scope="col">Size</th>
+              <th scope="col">Used</th>
+              <th scope="col">Available</th>
+              <th scope="col">Use %</th>
+              <th scope="col">Mounted on</th>
+            </tr>
+          </thead>
+          <tbody id="res-disk-tbody"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- ---- Apt / updates panel ---- -->

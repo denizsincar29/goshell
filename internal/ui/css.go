@@ -369,6 +369,54 @@ dialog textarea {
   font-weight: 600;
 }
 
+/* ---- File browser tree ---- */
+.files-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.files-tree-wrap {
+  flex: 2 1 420px;
+  max-height: 55vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+.files-tree {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+}
+.files-tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.4em;
+}
+.tree-node-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.tree-node-row:hover { background: #2c2c2c; }
+.tree-node-row[aria-selected="true"] {
+  background: #2f4f6b;
+  outline: 2px solid var(--accent);
+}
+.tree-twisty {
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+  color: var(--fg-muted);
+}
+.files-details {
+  flex: 1 1 260px;
+  min-width: 240px;
+}
+
 /* Respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }

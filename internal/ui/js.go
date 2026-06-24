@@ -310,7 +310,10 @@ function selectTab(id) {
     $('tab-' + t).setAttribute('aria-selected', selected ? 'true' : 'false');
     $('panel-' + t).hidden = !selected;
   });
-  announce(id.charAt(0).toUpperCase() + id.slice(1) + ' tab selected');
+  // No announce() here: role="tab" + aria-selected is already a native
+  // state NVDA speaks on its own when a tab is activated. A live-region
+  // announcement on top of that is a second, redundant voice for the
+  // same event, not new information.
 }
 
 // ============== Services tab ==============
@@ -679,52 +682,62 @@ async function saveCrontabRaw() {
 }
 
 // ============== Files tab ==============
+//
+// A real ARIA tree (role="tree" / role="treeitem"), not a table that gets
+// fully replaced on every navigation. Folders expand in place: opening one
+// fetches and inserts its children as a nested group, without throwing
+// away the rest of the tree or moving the screen reader's position back
+// to the top. Follows the WAI-ARIA tree view keyboard pattern: Up/Down
+// move between visible items, Right expands a folder (or moves into it if
+// already expanded), Left collapses a folder (or moves to its parent if
+// already collapsed), Enter opens a file or toggles a folder, Home/End
+// jump to the first/last visible item. The tree container itself is the
+// only tab stop; focus moves between items via roving tabindex.
 
-let currentPath = '/';
-let filesData = [];
-let selectedFile = null;
+let treeRootPath = '/';
+let treeFocusedPath = null; // path of the item that currently has roving focus
+let treeNodesByPath = {};   // path -> { li, rowEl, entry, expanded, loaded }
 
 function initFilesTab() {
-  $('files-up').addEventListener('click', function () {
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    navigateFiles('/' + parts.join('/'));
-  });
   $('files-home').addEventListener('click', function () {
-    navigateFiles('/');
+    goToPath('/');
     announce('Use the path field to type your home directory, e.g. /home/yourusername');
   });
-  $('files-root').addEventListener('click', function () { navigateFiles('/'); });
-  $('files-go').addEventListener('click', function () { navigateFiles($('files-path').value); });
+  $('files-root').addEventListener('click', function () { goToPath('/'); });
+  $('files-go').addEventListener('click', function () { goToPath($('files-path').value); });
   $('files-path').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') navigateFiles(this.value);
+    if (e.key === 'Enter') goToPath(this.value);
   });
-  $('files-refresh').addEventListener('click', function () { navigateFiles(currentPath); });
+  $('files-refresh').addEventListener('click', function () { goToPath(treeRootPath, true); });
 
-  $('files-tbody').addEventListener('click', function (e) {
-    const tr = e.target.closest('tr');
-    if (tr) selectFileRow(tr);
-  });
-  $('files-tbody').addEventListener('dblclick', function (e) {
-    const tr = e.target.closest('tr');
-    if (tr) activateFileRow(tr);
-  });
-  $('files-tbody').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      const tr = e.target.closest('tr');
-      if (tr) activateFileRow(tr);
+  $('files-tree').addEventListener('keydown', onTreeKeyDown);
+  $('files-tree').addEventListener('click', function (e) {
+    const row = e.target.closest('.tree-node-row');
+    if (!row) return;
+    const path = row.dataset.path;
+    if (e.target.closest('.tree-twisty')) {
+      toggleNode(path);
+    } else {
+      focusNode(path);
+      const node = treeNodesByPath[path];
+      if (node && node.entry.IsDir) toggleNode(path); else openFileEditorFor(path);
     }
   });
 
-  $('files-edit').addEventListener('click', openFileEditor);
+  $('files-edit').addEventListener('click', function () {
+    if (!treeFocusedPath) { announce('No item selected', true); return; }
+    const node = treeNodesByPath[treeFocusedPath];
+    if (!node || node.entry.IsDir) { announce('Select a file, not a folder, to edit', true); return; }
+    openFileEditorFor(treeFocusedPath);
+  });
   $('files-chmod').addEventListener('click', function () {
-    if (!selectedFile) { announce('No item selected', true); return; }
-    $('chmod-path').textContent = 'Path: ' + selectedFilePath();
+    if (!treeFocusedPath) { announce('No item selected', true); return; }
+    $('chmod-path').textContent = 'Path: ' + treeFocusedPath;
     openDialog('dlg-chmod');
   });
   $('files-chown').addEventListener('click', function () {
-    if (!selectedFile) { announce('No item selected', true); return; }
-    $('chown-path').textContent = 'Path: ' + selectedFilePath();
+    if (!treeFocusedPath) { announce('No item selected', true); return; }
+    $('chown-path').textContent = 'Path: ' + treeFocusedPath;
     openDialog('dlg-chown');
   });
   $('files-disk').addEventListener('click', showDiskUsage);
@@ -733,14 +746,14 @@ function initFilesTab() {
     e.preventDefault();
     try {
       await call('chmod', {
-        path: selectedFilePath(),
+        path: treeFocusedPath,
         mode: $('chmod-mode').value,
         recursive: $('chmod-recursive').checked,
         use_sudo: $('chmod-sudo').checked
       });
       announce('Permissions changed');
       $('dlg-chmod').close();
-      navigateFiles(currentPath);
+      refreshNodeDetails(treeFocusedPath);
     } catch (err) {
       announce('chmod error: ' + err.message, true);
     }
@@ -750,7 +763,7 @@ function initFilesTab() {
     e.preventDefault();
     try {
       await call('chown', {
-        path: selectedFilePath(),
+        path: treeFocusedPath,
         owner: $('chown-owner').value,
         group: $('chown-group').value,
         recursive: $('chown-recursive').checked,
@@ -758,90 +771,233 @@ function initFilesTab() {
       });
       announce('Owner changed');
       $('dlg-chown').close();
-      navigateFiles(currentPath);
+      refreshNodeDetails(treeFocusedPath);
     } catch (err) {
       announce('chown error: ' + err.message, true);
     }
   });
 
   $('file-editor-save').addEventListener('click', saveFileEditor);
+
+  goToPath('/');
 }
 
-async function navigateFiles(path) {
-  path = path.replace(/\/+$/, '') || '/';
+// Rebuilds the tree from scratch rooted at the given path. Used for the
+// initial load, Root/Home/Go-to-path, and manual refresh -- not for
+// expanding a folder you're already looking at, which uses toggleNode()
+// instead and never touches anything else on screen.
+async function goToPath(path, isRefresh) {
+  path = (path || '/').replace(/\/+$/, '') || '/';
   $('files-status').textContent = 'Loading ' + path + ' …';
   try {
     const data = await call('list_dir', path);
-    currentPath = data.path;
-    filesData = data.entries || [];
-    $('files-path').value = currentPath;
-    renderFilesTable();
-    $('files-status').textContent = currentPath + ' — ' + filesData.length + ' entries';
-    announce('Loaded ' + currentPath + ', ' + filesData.length + ' entries');
+    treeRootPath = data.path;
+    treeNodesByPath = {};
+    $('files-path').value = treeRootPath;
+
+    const tree = $('files-tree');
+    tree.innerHTML = '';
+    (data.entries || []).forEach(function (entry) {
+      const childPath = joinPath(treeRootPath, entry.Name);
+      const li = buildTreeNode(entry, childPath, 1);
+      tree.appendChild(li);
+    });
+
+    resetDetailsPanel();
+    const first = tree.querySelector('.tree-node-row');
+    if (first) {
+      first.tabIndex = 0;
+      treeFocusedPath = first.dataset.path;
+    }
+    $('files-status').textContent = treeRootPath + (isRefresh ? ' refreshed' : '') + ' — ' + (data.entries || []).length + ' entries';
   } catch (err) {
     $('files-status').textContent = 'Error: ' + err.message;
     announce('Error: ' + err.message, true);
   }
 }
 
-function renderFilesTable() {
-  const tbody = $('files-tbody');
-  tbody.innerHTML = '';
-  if (currentPath !== '/') {
-    const tr = document.createElement('tr');
-    tr.tabIndex = 0;
-    tr.dataset.name = '..';
-    tr.dataset.isdir = '1';
-    tr.innerHTML = '<td>.. (parent directory)</td><td>d---------</td><td></td><td></td><td></td><td></td>';
-    tbody.appendChild(tr);
+function joinPath(dir, name) {
+  return dir === '/' ? '/' + name : dir + '/' + name;
+}
+
+function buildTreeNode(entry, path, level) {
+  const li = document.createElement('li');
+  li.setAttribute('role', 'treeitem');
+  li.setAttribute('aria-level', String(level));
+  if (entry.IsDir) li.setAttribute('aria-expanded', 'false');
+
+  const row = document.createElement('div');
+  row.className = 'tree-node-row';
+  row.dataset.path = path;
+  row.tabIndex = -1; // roving tabindex; only the focused item is 0
+
+  const twisty = document.createElement('span');
+  twisty.className = 'tree-twisty';
+  twisty.setAttribute('aria-hidden', 'true');
+  twisty.textContent = entry.IsDir ? '▸' : '';
+
+  const label = document.createElement('span');
+  label.textContent = entry.Name + (entry.IsDir ? '/' : '');
+
+  row.appendChild(twisty);
+  row.appendChild(label);
+  li.appendChild(row);
+
+  treeNodesByPath[path] = { li: li, rowEl: row, entry: entry, expanded: false, loaded: false };
+  return li;
+}
+
+async function toggleNode(path) {
+  const node = treeNodesByPath[path];
+  if (!node || !node.entry.IsDir) return;
+
+  if (node.expanded) {
+    const group = node.li.querySelector('ul');
+    if (group) group.remove();
+    node.expanded = false;
+    node.li.setAttribute('aria-expanded', 'false');
+    node.rowEl.querySelector('.tree-twisty').textContent = '▸';
+    focusNode(path);
+    return;
   }
-  filesData.forEach(function (f) {
-    const tr = document.createElement('tr');
-    tr.tabIndex = 0;
-    tr.dataset.name = f.Name;
-    tr.dataset.isdir = f.IsDir ? '1' : '0';
-    tr.innerHTML =
-      '<td>' + escapeHTML(f.Name) + (f.IsDir ? '/' : '') + '</td>' +
-      '<td>' + escapeHTML(f.Permissions) + '</td>' +
-      '<td>' + escapeHTML(f.Owner) + '</td>' +
-      '<td>' + escapeHTML(f.Group) + '</td>' +
-      '<td>' + (f.IsDir ? '<dir>' : f.Size) + '</td>' +
-      '<td>' + escapeHTML(f.Modified) + '</td>';
-    tbody.appendChild(tr);
+
+  if (!node.loaded) {
+    $('files-status').textContent = 'Loading ' + path + ' …';
+    try {
+      const data = await call('list_dir', path);
+      const level = parseInt(node.li.getAttribute('aria-level'), 10) + 1;
+      const group = document.createElement('ul');
+      group.setAttribute('role', 'group');
+      (data.entries || []).forEach(function (entry) {
+        const childPath = joinPath(path, entry.Name);
+        group.appendChild(buildTreeNode(entry, childPath, level));
+      });
+      node.li.appendChild(group);
+      node.loaded = true;
+      $('files-status').textContent = path + ' — ' + (data.entries || []).length + ' entries';
+    } catch (err) {
+      $('files-status').textContent = 'Error opening ' + path + ': ' + err.message;
+      announce('Error opening folder: ' + err.message, true);
+      return;
+    }
+  }
+
+  node.expanded = true;
+  node.li.setAttribute('aria-expanded', 'true');
+  node.rowEl.querySelector('.tree-twisty').textContent = '▾';
+  focusNode(path);
+}
+
+function visibleRows() {
+  return Array.prototype.slice.call($('files-tree').querySelectorAll('.tree-node-row'));
+}
+
+function focusNode(path) {
+  const node = treeNodesByPath[path];
+  if (!node) return;
+  const rows = visibleRows();
+  rows.forEach(function (r) { r.tabIndex = -1; });
+  node.rowEl.tabIndex = 0;
+  node.rowEl.focus();
+  treeFocusedPath = path;
+  showNodeDetails(node.entry, path);
+}
+
+function onTreeKeyDown(e) {
+  if (!treeFocusedPath) return;
+  const rows = visibleRows();
+  const idx = rows.findIndex(function (r) { return r.dataset.path === treeFocusedPath; });
+  if (idx < 0) return;
+  const node = treeNodesByPath[treeFocusedPath];
+
+  switch (e.key) {
+    case 'ArrowDown':
+      e.preventDefault();
+      if (idx + 1 < rows.length) focusNode(rows[idx + 1].dataset.path);
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      if (idx - 1 >= 0) focusNode(rows[idx - 1].dataset.path);
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      if (node.entry.IsDir && !node.expanded) {
+        toggleNode(treeFocusedPath);
+      } else if (node.entry.IsDir && node.expanded) {
+        if (idx + 1 < rows.length) focusNode(rows[idx + 1].dataset.path);
+      }
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      if (node.entry.IsDir && node.expanded) {
+        toggleNode(treeFocusedPath);
+      } else {
+        const parentLi = node.li.parentElement.closest('li[role="treeitem"]');
+        if (parentLi) {
+          const parentRow = parentLi.querySelector('.tree-node-row');
+          if (parentRow) focusNode(parentRow.dataset.path);
+        }
+      }
+      break;
+    case 'Home':
+      e.preventDefault();
+      if (rows.length) focusNode(rows[0].dataset.path);
+      break;
+    case 'End':
+      e.preventDefault();
+      if (rows.length) focusNode(rows[rows.length - 1].dataset.path);
+      break;
+    case 'Enter':
+      e.preventDefault();
+      if (node.entry.IsDir) toggleNode(treeFocusedPath);
+      else openFileEditorFor(treeFocusedPath);
+      break;
+  }
+}
+
+function showNodeDetails(entry, path) {
+  $('fd-name').textContent = entry.Name;
+  $('fd-type').textContent = entry.IsDir ? 'Folder' : 'File';
+  $('fd-perms').textContent = entry.Permissions || '—';
+  $('fd-owner').textContent = entry.Owner || '—';
+  $('fd-group').textContent = entry.Group || '—';
+  $('fd-size').textContent = entry.IsDir ? '—' : String(entry.Size);
+  $('fd-modified').textContent = entry.Modified || '—';
+  $('fd-path').textContent = path;
+}
+
+function resetDetailsPanel() {
+  ['fd-type', 'fd-perms', 'fd-owner', 'fd-group', 'fd-size', 'fd-modified', 'fd-path'].forEach(function (id) {
+    $(id).textContent = '—';
   });
+  $('fd-name').textContent = 'None selected';
 }
 
-function selectFileRow(tr) {
-  document.querySelectorAll('#files-tbody tr').forEach(function (r) { r.removeAttribute('aria-selected'); });
-  tr.setAttribute('aria-selected', 'true');
-  selectedFile = tr.dataset;
+// After chmod/chown, re-fetch just the parent listing so the one row's
+// permissions/owner refresh without collapsing or reloading the rest of
+// the tree the user has open.
+async function refreshNodeDetails(path) {
+  const node = treeNodesByPath[path];
+  if (!node) return;
+  const parentPath = path === treeRootPath ? null : path.slice(0, path.length - ('/' + node.entry.Name).length) || '/';
+  try {
+    const data = await call('list_dir', parentPath === null ? treeRootPath : parentPath);
+    const updated = (data.entries || []).find(function (e) { return e.Name === node.entry.Name; });
+    if (updated) {
+      node.entry = updated;
+      showNodeDetails(updated, path);
+    }
+  } catch (err) {
+    // Non-fatal: the chmod/chown itself already succeeded and was announced.
+  }
 }
 
-function activateFileRow(tr) {
-  selectFileRow(tr);
-  const isDir = tr.dataset.isdir === '1';
-  const name = tr.dataset.name;
-  if (name === '..') {
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    navigateFiles('/' + parts.join('/'));
+async function openFileEditorFor(path) {
+  const node = treeNodesByPath[path];
+  if (!node || node.entry.IsDir) {
+    announce('Select a file, not a folder, to edit', true);
     return;
   }
-  if (isDir) navigateFiles(currentPath === '/' ? '/' + name : currentPath + '/' + name);
-}
-
-function selectedFilePath() {
-  if (!selectedFile) return '';
-  if (selectedFile.name === '..') return currentPath;
-  return currentPath === '/' ? '/' + selectedFile.name : currentPath + '/' + selectedFile.name;
-}
-
-async function openFileEditor() {
-  if (!selectedFile || selectedFile.isdir === '1') {
-    announce('Select a file (not a directory) to edit', true);
-    return;
-  }
-  const path = selectedFilePath();
   const useSudo = $('files-sudo').checked;
   $('file-editor-path').textContent = path;
   $('file-editor-status').textContent = 'Loading…';
@@ -850,7 +1006,6 @@ async function openFileEditor() {
   $('file-editor-textarea').dataset.path = path;
   openDialog('dlg-file-editor');
   try {
-    // ReadFile(path string, useSudo bool) -> two positional args
     const content = await call('read_file', path, useSudo);
     $('file-editor-textarea').value = content;
     $('file-editor-status').textContent = 'Loaded ' + content.length + ' characters';
@@ -875,13 +1030,10 @@ async function saveFileEditor() {
   }
 }
 
-async function showDiskUsage() {
-  try {
-    const output = await call('disk_usage');
-    alert('Disk usage:' + String.fromCharCode(10) + String.fromCharCode(10) + output);
-  } catch (err) {
-    announce('Error: ' + err.message, true);
-  }
+function showDiskUsage() {
+  selectTab('resources');
+  refreshResources();
+  announce('Switched to the Resources tab to view disk usage');
 }
 
 // ============== Resources tab ==============
@@ -891,12 +1043,12 @@ let resAutoTimer = null;
 function initResourcesTab() {
   $('res-refresh').addEventListener('click', refreshResources);
   $('res-auto').addEventListener('change', function () {
+    // Native checkbox semantics already announce checked/unchecked;
+    // no announce() needed here (same reasoning as the tab fix above).
     if (this.checked) {
       resAutoTimer = window.setInterval(refreshResources, 5000);
-      announce('Auto-refresh enabled');
     } else {
       if (resAutoTimer) window.clearInterval(resAutoTimer);
-      announce('Auto-refresh disabled');
     }
   });
   refreshResources();
@@ -919,11 +1071,45 @@ async function refreshResources() {
       '<dt>RAM</dt><dd>' + memUsedMB + ' MB used of ' + memTotalMB + ' MB (' + memPct + '%)</dd>' +
       '<dt>Swap</dt><dd>' + swapUsedMB + ' MB used of ' + swapTotalMB + ' MB</dd>';
 
-    $('res-processes').value = procs;
-    $('res-disk').value = disk;
+    renderProcessTable(procs || []);
+    renderDiskTable(disk || []);
   } catch (err) {
     announce('Error loading resources: ' + err.message, true);
   }
+}
+
+function renderProcessTable(procs) {
+  const tbody = $('res-proc-tbody');
+  tbody.innerHTML = '';
+  procs.forEach(function (p) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + escapeHTML(p.user) + '</td>' +
+      '<td>' + escapeHTML(p.pid) + '</td>' +
+      '<td>' + p.cpu.toFixed(1) + '</td>' +
+      '<td>' + p.mem.toFixed(1) + '</td>' +
+      '<td>' + escapeHTML(p.stat) + '</td>' +
+      '<td>' + escapeHTML(p.start) + '</td>' +
+      '<td>' + escapeHTML(p.time) + '</td>' +
+      '<td>' + escapeHTML(p.command) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function renderDiskTable(disks) {
+  const tbody = $('res-disk-tbody');
+  tbody.innerHTML = '';
+  disks.forEach(function (d) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + escapeHTML(d.filesystem) + '</td>' +
+      '<td>' + escapeHTML(d.size) + '</td>' +
+      '<td>' + escapeHTML(d.used) + '</td>' +
+      '<td>' + escapeHTML(d.avail) + '</td>' +
+      '<td>' + escapeHTML(d.use_percent) + '</td>' +
+      '<td>' + escapeHTML(d.mounted_on) + '</td>';
+    tbody.appendChild(tr);
+  });
 }
 
 // ============== Apt tab (WebSocket: live progress + output) ==============
@@ -1058,8 +1244,45 @@ function runTerminalCommand() {
 
 // ============== Init ==============
 
+// Returns the element that should receive keyboard focus right now: the
+// currently focused element if there is one and it's still visible/in the
+// document, otherwise a sensible default per screen (first field on the
+// connect screen, the active tab button in a session).
+function defaultFocusTarget() {
+  if (!$('screen-session').hidden) {
+    const activeTab = document.querySelector('.tab-btn[aria-selected="true"]');
+    return activeTab || $('tab-services');
+  }
+  return $('field-hostname');
+}
+
+function refocusContent() {
+  const active = document.activeElement;
+  // If focus already landed somewhere real inside the page, leave it.
+  if (active && active !== document.body && active !== document.documentElement) {
+    return;
+  }
+  const target = defaultFocusTarget();
+  if (target) target.focus();
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   loadConnectScreenData();
   $('field-hostname').focus();
+
+  // WebView-embedded apps (this one included) can lose keyboard focus on
+  // the actual page content when the OS window is minimized, Alt-Tabbed
+  // away from, and then back -- the top-level window gets OS focus again,
+  // but the document inside the WebView control doesn't automatically
+  // get focus restored to a specific element, which leaves NVDA's
+  // browse-mode cursor with nothing to anchor to until the user clicks.
+  // Re-focusing a sensible default element on these events closes most
+  // of that gap from the JS side; main.go's native SetFocus/grab_focus
+  // call on window-shown handles getting the WebView *control* itself
+  // OS keyboard focus in the first place.
+  window.addEventListener('focus', refocusContent);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') refocusContent();
+  });
 });
 `

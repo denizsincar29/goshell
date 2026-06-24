@@ -199,9 +199,50 @@ func (c *Client) Chown(path, owner, group string, recursive bool, useSudo bool) 
 	return c.RunMaybeSudo(cmd, useSudo)
 }
 
-// DiskUsage returns disk usage info
-func (c *Client) DiskUsage() (string, error) {
-	return c.Run("df -h 2>&1")
+// DiskInfo is one row of `df -h` output, broken into actual fields.
+type DiskInfo struct {
+	Filesystem string `json:"filesystem"`
+	Size       string `json:"size"`
+	Used       string `json:"used"`
+	Avail      string `json:"avail"`
+	UsePercent string `json:"use_percent"`
+	MountedOn  string `json:"mounted_on"`
+}
+
+// DiskUsage returns disk usage info as structured rows.
+func (c *Client) DiskUsage() ([]DiskInfo, error) {
+	out, err := c.Run("df -h 2>&1")
+	if err != nil {
+		return nil, fmt.Errorf("df -h: %w: %s", err, out)
+	}
+	return parseDFH(out), nil
+}
+
+func parseDFH(out string) []DiskInfo {
+	lines := strings.Split(out, "\n")
+	var disks []DiskInfo
+	for i, line := range lines {
+		if i == 0 {
+			continue // header row (Filesystem Size Used Avail Use% Mounted on)
+		}
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		disks = append(disks, DiskInfo{
+			Filesystem: fields[0],
+			Size:       fields[1],
+			Used:       fields[2],
+			Avail:      fields[3],
+			UsePercent: fields[4],
+			MountedOn:  strings.Join(fields[5:], " "),
+		})
+	}
+	return disks
 }
 
 // DirSize returns size of a specific directory
@@ -251,9 +292,65 @@ func (c *Client) GetResources() (*ResourceInfo, error) {
 	return ri, nil
 }
 
-// GetProcesses returns a list of top processes
-func (c *Client) GetProcesses() (string, error) {
-	return c.Run("ps aux --sort=-%cpu | head -30 2>&1")
+// ProcessInfo is one row of `ps aux` output, broken into actual fields
+// instead of one fixed-width text line. ps aux's first 10 columns are
+// single whitespace-delimited tokens; everything after that is COMMAND,
+// which may itself contain spaces, so it's captured as the remainder.
+type ProcessInfo struct {
+	User    string  `json:"user"`
+	PID     string  `json:"pid"`
+	CPU     float64 `json:"cpu"`
+	Mem     float64 `json:"mem"`
+	VSZ     string  `json:"vsz"`
+	RSS     string  `json:"rss"`
+	TTY     string  `json:"tty"`
+	Stat    string  `json:"stat"`
+	Start   string  `json:"start"`
+	Time    string  `json:"time"`
+	Command string  `json:"command"`
+}
+
+// GetProcesses returns the top processes by CPU usage as structured rows.
+func (c *Client) GetProcesses() ([]ProcessInfo, error) {
+	out, err := c.Run("ps aux --sort=-%cpu 2>&1 | head -31") // header + 30 rows
+	if err != nil {
+		return nil, fmt.Errorf("ps aux: %w: %s", err, out)
+	}
+	return parsePSAux(out), nil
+}
+
+func parsePSAux(out string) []ProcessInfo {
+	lines := strings.Split(out, "\n")
+	var procs []ProcessInfo
+	for i, line := range lines {
+		if i == 0 {
+			continue // header row (USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND)
+		}
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+		cpu, _ := strconv.ParseFloat(fields[2], 64)
+		mem, _ := strconv.ParseFloat(fields[3], 64)
+		procs = append(procs, ProcessInfo{
+			User:    fields[0],
+			PID:     fields[1],
+			CPU:     cpu,
+			Mem:     mem,
+			VSZ:     fields[4],
+			RSS:     fields[5],
+			TTY:     fields[6],
+			Stat:    fields[7],
+			Start:   fields[8],
+			Time:    fields[9],
+			Command: strings.Join(fields[10:], " "),
+		})
+	}
+	return procs
 }
 
 // ---- Helper installation ----
