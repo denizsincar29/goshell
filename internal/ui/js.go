@@ -3,6 +3,15 @@ package ui
 const appJS = `
 'use strict';
 
+// All request/response calls go straight through glaze's Bind bridge:
+// window.goshell_<method>(args...) returns a Promise, backed directly by a
+// Go method on Service (see internal/ui/service.go). There is no fetch/JSON
+// route layer to maintain for these.
+//
+// Only two things still go over a real WebSocket, because Bind has no
+// server-push primitive: live apt output/progress, and the interactive
+// terminal (stdin keeps flowing while output keeps streaming).
+
 // ============== Utilities ==============
 
 function $(id) { return document.getElementById(id); }
@@ -17,27 +26,8 @@ function setStatus(msg) {
   $('connection-status').textContent = msg;
 }
 
-async function apiGet(path) {
-  const res = await fetch(path);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  return data;
-}
-
-async function apiPost(path, body) {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  return data;
-}
-
 function wsURL(path) {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return proto + '//' + window.location.host + path;
+  return 'ws://' + window.location.host + path;
 }
 
 function escapeHTML(s) {
@@ -46,13 +36,18 @@ function escapeHTML(s) {
   return div.innerHTML;
 }
 
+async function call(fnName) {
+  const fn = window['goshell_' + fnName];
+  if (!fn) throw new Error('not available: ' + fnName);
+  const args = Array.prototype.slice.call(arguments, 1);
+  return await fn.apply(null, args);
+}
+
 // ============== Dialog handling ==============
 
 document.addEventListener('click', function (e) {
   const closeId = e.target.getAttribute && e.target.getAttribute('data-close-dialog');
-  if (closeId) {
-    $(closeId).close();
-  }
+  if (closeId) $(closeId).close();
 });
 
 function openDialog(id) {
@@ -69,11 +64,9 @@ let savedHosts = [];
 
 async function loadConnectScreenData() {
   try {
-    const sshHosts = await apiGet('/api/ssh/hosts');
-    const keys = await apiGet('/api/ssh/keys');
-    const hostsConf = await apiGet('/api/config/hosts');
-    sshConfigHosts = sshHosts || [];
-    savedHosts = hostsConf || [];
+    sshConfigHosts = await call('ssh_hosts') || [];
+    const keys = await call('ssh_keys') || [];
+    savedHosts = await call('config_hosts') || [];
 
     const sel = $('known-hosts-select');
     sel.innerHTML = '<option value="">— manual entry —</option>';
@@ -92,11 +85,10 @@ async function loadConnectScreenData() {
 
     const keySel = $('field-key');
     keySel.innerHTML = '<option value="">— none / try all keys —</option>';
-    (keys || []).forEach(function (k) {
+    keys.forEach(function (k) {
       const opt = document.createElement('option');
       opt.value = k;
-      const base = k.split('/').pop();
-      opt.textContent = base + '  (' + k + ')';
+      opt.textContent = k.split('/').pop() + '  (' + k + ')';
       keySel.appendChild(opt);
     });
   } catch (err) {
@@ -108,8 +100,7 @@ $('known-hosts-select').addEventListener('change', function () {
   const val = this.value;
   if (!val) return;
   if (val.indexOf('saved:') === 0) {
-    const name = val.slice(6);
-    const h = savedHosts.find(function (x) { return x.name === name; });
+    const h = savedHosts.find(function (x) { return x.name === val.slice(6); });
     if (h) {
       $('field-hostname').value = h.hostname || '';
       $('field-port').value = h.port || '22';
@@ -118,8 +109,7 @@ $('known-hosts-select').addEventListener('change', function () {
       if (h.key_file) selectKeyByPath(h.key_file);
     }
   } else if (val.indexOf('config:') === 0) {
-    const name = val.slice(7);
-    const h = sshConfigHosts.find(function (x) { return x.Name === name; });
+    const h = sshConfigHosts.find(function (x) { return x.Name === val.slice(7); });
     if (h) {
       if (h.Hostname) $('field-hostname').value = h.Hostname;
       if (h.Port) $('field-port').value = h.Port;
@@ -162,7 +152,7 @@ $('connect-form').addEventListener('submit', async function (e) {
   setStatus('Connecting to ' + params.User + '@' + params.Host + ':' + params.Port + ' …');
   announce('Connecting…');
   try {
-    const data = await apiPost('/api/ssh/connect', params);
+    const data = await call('connect', params);
     setStatus('Connected to ' + data.user + '@' + data.host);
     announce('Connected to ' + data.host);
     $('session-target').textContent = data.user + '@' + data.host;
@@ -178,7 +168,7 @@ $('connect-form').addEventListener('submit', async function (e) {
 });
 
 $('btn-disconnect').addEventListener('click', async function () {
-  try { await apiPost('/api/ssh/disconnect', {}); } catch (e) {}
+  try { await call('disconnect'); } catch (e) {}
   setStatus('Not connected');
   announce('Disconnected');
   $('screen-session').hidden = true;
@@ -188,7 +178,7 @@ $('btn-disconnect').addEventListener('click', async function () {
 
 $('btn-open-settings').addEventListener('click', async function () {
   try {
-    const cfg = await apiGet('/api/config/settings');
+    const cfg = await call('get_settings');
     $('settings-sudo').value = cfg.GlobalSudo || '';
     $('settings-lines').value = cfg.DefaultLines || 200;
   } catch (e) {}
@@ -198,7 +188,7 @@ $('btn-open-settings').addEventListener('click', async function () {
 $('settings-form').addEventListener('submit', async function (e) {
   e.preventDefault();
   try {
-    await apiPost('/api/config/settings', {
+    await call('save_settings', {
       GlobalSudo: $('settings-sudo').value,
       DefaultLines: parseInt($('settings-lines').value, 10) || 200
     });
@@ -225,7 +215,7 @@ $('save-host-form').addEventListener('submit', async function (e) {
   const name = $('save-host-name').value.trim();
   if (!name) return;
   try {
-    await apiPost('/api/config/save-host', {
+    await call('save_host', {
       name: name,
       hostname: $('field-hostname').value.trim(),
       port: $('field-port').value.trim() || '22',
@@ -266,7 +256,7 @@ function renderSavedHostsList() {
     delBtn.setAttribute('aria-label', 'Delete saved host ' + h.name);
     delBtn.addEventListener('click', async function () {
       try {
-        await apiPost('/api/config/delete-host?name=' + encodeURIComponent(h.name), {});
+        await call('delete_host', h.name);
         announce('Deleted host ' + h.name);
         await loadConnectScreenData();
         renderSavedHostsList();
@@ -283,22 +273,20 @@ function renderSavedHostsList() {
 
 const tabIds = ['services', 'cron', 'files', 'resources', 'apt', 'terminal'];
 let sessionInitialized = false;
+let currentTab = 'services';
 
 function initSessionScreen() {
   tabIds.forEach(function (id) {
     $('tab-' + id).addEventListener('click', function () { selectTab(id); });
   });
-  const tabList = document.querySelector('.tab-list');
-  tabList.addEventListener('keydown', function (e) {
+  document.querySelector('.tab-list').addEventListener('keydown', function (e) {
     const idx = tabIds.indexOf(currentTab);
     if (e.key === 'ArrowRight') {
       const next = tabIds[(idx + 1) % tabIds.length];
-      selectTab(next);
-      $('tab-' + next).focus();
+      selectTab(next); $('tab-' + next).focus();
     } else if (e.key === 'ArrowLeft') {
       const prev = tabIds[(idx - 1 + tabIds.length) % tabIds.length];
-      selectTab(prev);
-      $('tab-' + prev).focus();
+      selectTab(prev); $('tab-' + prev).focus();
     }
   });
 
@@ -314,8 +302,6 @@ function initSessionScreen() {
   selectTab('services');
   refreshServices();
 }
-
-let currentTab = 'services';
 
 function selectTab(id) {
   currentTab = id;
@@ -335,7 +321,6 @@ let selectedService = null;
 function initServicesTab() {
   $('svc-refresh').addEventListener('click', refreshServices);
   $('svc-filter').addEventListener('input', renderServicesTable);
-
   $('svc-start').addEventListener('click', function () { serviceAction('start'); });
   $('svc-stop').addEventListener('click', function () { serviceAction('stop'); });
   $('svc-restart').addEventListener('click', function () { serviceAction('restart'); });
@@ -343,18 +328,16 @@ function initServicesTab() {
   $('svc-disable').addEventListener('click', function () { serviceAction('disable'); });
   $('svc-logs').addEventListener('click', viewServiceLogs);
   $('svc-status').addEventListener('click', viewServiceStatus);
-
   $('svc-tbody').addEventListener('click', function (e) {
     const tr = e.target.closest('tr');
-    if (!tr) return;
-    selectServiceRow(tr);
+    if (tr) selectServiceRow(tr);
   });
 }
 
 async function refreshServices() {
   setStatus('Loading services…');
   try {
-    servicesData = await apiGet('/api/services/list') || [];
+    servicesData = await call('list_services') || [];
     renderServicesTable();
     setStatus('Connected — ' + servicesData.length + ' services loaded');
     announce(servicesData.length + ' services loaded');
@@ -395,7 +378,7 @@ async function serviceAction(action) {
   const useSudo = $('svc-sudo').checked;
   setStatus('Running systemctl ' + action + ' ' + selectedService + ' …');
   try {
-    await apiPost('/api/services/action', { name: selectedService, action: action, use_sudo: useSudo });
+    await call('service_action', { name: selectedService, action: action, use_sudo: useSudo });
     announce('systemctl ' + action + ' ' + selectedService + ' succeeded');
     setStatus('OK: systemctl ' + action + ' ' + selectedService);
     refreshServices();
@@ -409,8 +392,8 @@ async function viewServiceLogs() {
   if (!selectedService) { announce('No service selected', true); return; }
   setStatus('Loading logs for ' + selectedService + ' …');
   try {
-    const data = await apiGet('/api/services/logs?name=' + encodeURIComponent(selectedService));
-    $('svc-output').value = data.logs;
+    const logs = await call('service_logs', selectedService);
+    $('svc-output').value = logs;
     announce('Logs loaded for ' + selectedService);
     $('svc-output').focus();
   } catch (err) {
@@ -421,8 +404,7 @@ async function viewServiceLogs() {
 async function viewServiceStatus() {
   if (!selectedService) { announce('No service selected', true); return; }
   try {
-    const data = await apiGet('/api/services/logs?name=' + encodeURIComponent(selectedService) + '&status=1');
-    $('svc-output').value = data.logs;
+    $('svc-output').value = await call('service_status_detail', selectedService);
   } catch (err) {
     announce('Error: ' + err.message, true);
   }
@@ -439,8 +421,7 @@ async function loadCrontab() {
   const user = $('cron-user').value.trim();
   $('cron-status').textContent = 'Loading…';
   try {
-    const data = await apiGet('/api/cron/get?user=' + encodeURIComponent(user));
-    $('cron-editor').value = data.crontab;
+    $('cron-editor').value = await call('get_crontab', user);
     $('cron-status').textContent = 'Crontab loaded';
     announce('Crontab loaded');
   } catch (err) {
@@ -450,12 +431,13 @@ async function loadCrontab() {
 }
 
 async function saveCrontab() {
-  const user = $('cron-user').value.trim();
-  const useSudo = $('cron-sudo').checked;
-  const content = $('cron-editor').value;
   $('cron-status').textContent = 'Saving…';
   try {
-    await apiPost('/api/cron/set', { user: user, content: content, use_sudo: useSudo });
+    await call('set_crontab', {
+      user: $('cron-user').value.trim(),
+      content: $('cron-editor').value,
+      use_sudo: $('cron-sudo').checked
+    });
     $('cron-status').textContent = 'Crontab saved successfully';
     announce('Crontab saved');
   } catch (err) {
@@ -489,13 +471,11 @@ function initFilesTab() {
 
   $('files-tbody').addEventListener('click', function (e) {
     const tr = e.target.closest('tr');
-    if (!tr) return;
-    selectFileRow(tr);
+    if (tr) selectFileRow(tr);
   });
   $('files-tbody').addEventListener('dblclick', function (e) {
     const tr = e.target.closest('tr');
-    if (!tr) return;
-    activateFileRow(tr);
+    if (tr) activateFileRow(tr);
   });
   $('files-tbody').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') {
@@ -520,7 +500,7 @@ function initFilesTab() {
   $('chmod-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     try {
-      await apiPost('/api/files/chmod', {
+      await call('chmod', {
         path: selectedFilePath(),
         mode: $('chmod-mode').value,
         recursive: $('chmod-recursive').checked,
@@ -537,7 +517,7 @@ function initFilesTab() {
   $('chown-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     try {
-      await apiPost('/api/files/chown', {
+      await call('chown', {
         path: selectedFilePath(),
         owner: $('chown-owner').value,
         group: $('chown-group').value,
@@ -559,7 +539,7 @@ async function navigateFiles(path) {
   path = path.replace(/\/+$/, '') || '/';
   $('files-status').textContent = 'Loading ' + path + ' …';
   try {
-    const data = await apiGet('/api/files/list?path=' + encodeURIComponent(path));
+    const data = await call('list_dir', path);
     currentPath = data.path;
     filesData = data.entries || [];
     $('files-path').value = currentPath;
@@ -615,9 +595,7 @@ function activateFileRow(tr) {
     navigateFiles('/' + parts.join('/'));
     return;
   }
-  if (isDir) {
-    navigateFiles(currentPath === '/' ? '/' + name : currentPath + '/' + name);
-  }
+  if (isDir) navigateFiles(currentPath === '/' ? '/' + name : currentPath + '/' + name);
 }
 
 function selectedFilePath() {
@@ -640,9 +618,10 @@ async function openFileEditor() {
   $('file-editor-textarea').dataset.path = path;
   openDialog('dlg-file-editor');
   try {
-    const data = await apiGet('/api/files/read?path=' + encodeURIComponent(path) + '&sudo=' + (useSudo ? '1' : '0'));
-    $('file-editor-textarea').value = data.content;
-    $('file-editor-status').textContent = 'Loaded ' + data.content.length + ' characters';
+    // ReadFile(path string, useSudo bool) -> two positional args
+    const content = await call('read_file', path, useSudo);
+    $('file-editor-textarea').value = content;
+    $('file-editor-status').textContent = 'Loaded ' + content.length + ' characters';
     $('file-editor-textarea').focus();
   } catch (err) {
     $('file-editor-status').textContent = 'Error loading: ' + err.message;
@@ -655,7 +634,7 @@ async function saveFileEditor() {
   const useSudo = $('file-editor-sudo').checked;
   $('file-editor-status').textContent = 'Saving…';
   try {
-    await apiPost('/api/files/write', { path: path, content: content, use_sudo: useSudo });
+    await call('write_file', { path: path, content: content, use_sudo: useSudo });
     $('file-editor-status').textContent = 'Saved successfully';
     announce('File saved: ' + path);
   } catch (err) {
@@ -666,8 +645,8 @@ async function saveFileEditor() {
 
 async function showDiskUsage() {
   try {
-    const data = await apiGet('/api/disk');
-    alert('Disk usage:' + String.fromCharCode(10) + String.fromCharCode(10) + data.output);
+    const output = await call('disk_usage');
+    alert('Disk usage:' + String.fromCharCode(10) + String.fromCharCode(10) + output);
   } catch (err) {
     announce('Error: ' + err.message, true);
   }
@@ -693,37 +672,36 @@ function initResourcesTab() {
 
 async function refreshResources() {
   try {
-    const ri = await apiGet('/api/resources');
-    const procs = await apiGet('/api/processes');
-    const disk = await apiGet('/api/disk');
+    const ri = await call('get_resources');
+    const procs = await call('get_processes');
+    const disk = await call('disk_usage');
     const memUsedMB = Math.round(ri.MemUsed / 1024 / 1024);
     const memTotalMB = Math.round(ri.MemTotal / 1024 / 1024);
     const memPct = ri.MemTotal > 0 ? ((ri.MemUsed / ri.MemTotal) * 100).toFixed(1) : '0';
     const swapUsedMB = Math.round(ri.SwapUsed / 1024 / 1024);
     const swapTotalMB = Math.round(ri.SwapTotal / 1024 / 1024);
 
-    const dl = $('res-summary');
-    dl.innerHTML =
+    $('res-summary').innerHTML =
       '<dt>Uptime</dt><dd>' + escapeHTML(ri.Uptime || '') + '</dd>' +
       '<dt>CPU usage</dt><dd>' + ri.CPUPercent.toFixed(1) + '%</dd>' +
       '<dt>RAM</dt><dd>' + memUsedMB + ' MB used of ' + memTotalMB + ' MB (' + memPct + '%)</dd>' +
       '<dt>Swap</dt><dd>' + swapUsedMB + ' MB used of ' + swapTotalMB + ' MB</dd>';
 
-    $('res-processes').value = procs.output;
-    $('res-disk').value = disk.output;
+    $('res-processes').value = procs;
+    $('res-disk').value = disk;
   } catch (err) {
     announce('Error loading resources: ' + err.message, true);
   }
 }
 
-// ============== Apt tab ==============
+// ============== Apt tab (WebSocket: live progress + output) ==============
 
 let aptSocket = null;
 let aptRunning = false;
 
 function initAptTab() {
   $('apt-update').addEventListener('click', function () { runApt('update'); });
-  $('apt-upgrade').addEventListener('click', function () { runApt(getUpgradeOp()); });
+  $('apt-upgrade').addEventListener('click', function () { runApt($('apt-upgrade-type').value); });
   $('apt-both').addEventListener('click', function () { runApt('update+upgrade'); });
   $('apt-cancel').addEventListener('click', cancelApt);
   $('apt-clear').addEventListener('click', function () {
@@ -732,10 +710,6 @@ function initAptTab() {
     $('apt-progress-text').textContent = 'Idle';
     $('apt-status').textContent = 'Output cleared';
   });
-}
-
-function getUpgradeOp() {
-  return $('apt-upgrade-type').value;
 }
 
 function setAptBusy(busy) {
@@ -750,12 +724,10 @@ function appendAptOutput(text) {
   const ta = $('apt-output');
   ta.value += text;
   ta.scrollTop = ta.scrollHeight;
-  const lines = text.split(String.fromCharCode(10)).map(function(s){return s.trim();}).filter(Boolean);
+  const lines = text.split(String.fromCharCode(10)).map(function (s) { return s.trim(); }).filter(Boolean);
   if (lines.length) {
     const last = lines[lines.length - 1];
-    if (last.length < 140) {
-      $('apt-status').textContent = last;
-    }
+    if (last.length < 140) $('apt-status').textContent = last;
   }
 }
 
@@ -769,10 +741,7 @@ function runApt(operation) {
 
   aptSocket = new WebSocket(wsURL('/ws/apt'));
   aptSocket.onopen = function () {
-    aptSocket.send(JSON.stringify({
-      operation: operation,
-      config_action: $('apt-config-action').value
-    }));
+    aptSocket.send(JSON.stringify({ operation: operation, config_action: $('apt-config-action').value }));
   };
   aptSocket.onmessage = function (ev) {
     let msg;
@@ -800,30 +769,24 @@ function runApt(operation) {
     setAptBusy(false);
     announce('Connection error during apt operation', true);
   };
-  aptSocket.onclose = function () {
-    setAptBusy(false);
-  };
+  aptSocket.onclose = function () { setAptBusy(false); };
 }
 
 function cancelApt() {
-  if (aptSocket) {
-    aptSocket.close();
-  }
+  if (aptSocket) aptSocket.close();
   setAptBusy(false);
   appendAptOutput(String.fromCharCode(10) + '[Cancelled by user]' + String.fromCharCode(10));
   announce('apt operation cancelled', true);
 }
 
-// ============== Terminal tab ==============
+// ============== Terminal tab (WebSocket: live stdin/stdout) ==============
 
 function initTerminalTab() {
   $('term-form').addEventListener('submit', function (e) {
     e.preventDefault();
     runTerminalCommand();
   });
-  $('term-clear').addEventListener('click', function () {
-    $('term-output').value = '';
-  });
+  $('term-clear').addEventListener('click', function () { $('term-output').value = ''; });
 }
 
 function appendTermOutput(text) {
@@ -858,9 +821,7 @@ function runTerminalCommand() {
       }
     }
   };
-  sock.onerror = function () {
-    setStatus('Connection error');
-  };
+  sock.onerror = function () { setStatus('Connection error'); };
 }
 
 // ============== Init ==============

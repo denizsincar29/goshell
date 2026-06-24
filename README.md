@@ -15,11 +15,37 @@ story — you'd need MSYS2-bundled DLLs and NVDA still wouldn't read most of it 
 glaze uses the OS's native WebView (WebView2/Edge on Windows), which *does* speak UI Automation,
 so NVDA works out of the box, on both platforms, from one HTML/JS frontend.
 
+## Architecture
+
+Most of the app is plain request/response (connect, list services, read a file,
+chmod, save settings, …) — for that, `internal/ui/service.go` exposes a single
+`Service` struct whose every exported method becomes `window.goshell_<method>()`
+in JS automatically via `glaze.BindMethods`. No routes, no JSON encode/decode
+boilerplate, no fetch wrapper: the JS bridge handles all of that, and the
+binding's Promise rejects with the Go error directly.
+
+Two things are genuinely *not* request/response — live apt output/progress, and
+the interactive terminal, where stdin keeps flowing while stdout keeps streaming
+in. `Bind` has no server-push primitive (confirmed against glaze's own examples:
+even its REPL example just blocks until the whole result is ready), so those two
+go over real WebSockets in `internal/ui/server.go`, served by a small `net/http`
+server we start ourselves on a random loopback port. `glaze.New()` then opens a
+window pointed at that local URL and binds `Service` to it.
+
+(Note: `glaze.AppWindow`, the higher-level "just hand me an http.Handler"
+helper, was considered and dropped — it creates the window internally and
+never exposes the `WebView` value, so `Bind` isn't reachable through it.)
+
 ## Build
 
 Requires Go 1.26+ (glaze's minimum). On Linux you'll also need WebKitGTK dev headers
 at runtime (most distros ship this already); on Windows, the Edge WebView2 Runtime
 (preinstalled on Windows 10/11).
+
+`go.sum` is intentionally not committed — this sandbox's network blocks
+`proxy.golang.org`/`golang.org`, so any `go.sum` generated here would be
+checksummed against substitute mirrors, not the real modules. Run `go mod tidy`
+once on a normal machine and commit the result.
 
 ```bash
 git clone https://github.com/denizsincar29/goshell.git
