@@ -376,10 +376,12 @@ const indexHTML = `<!DOCTYPE html>
     <div role="tabpanel" id="panel-apt" aria-labelledby="tab-apt" class="tab-panel" hidden>
       <h3 class="visually-hidden">System updates</h3>
 
+      <p id="apt-pkgmgr-info" role="status" aria-live="polite" class="cron-preview">Package manager not yet checked.</p>
+
       <fieldset>
         <legend>Options</legend>
         <div class="field-row">
-          <label for="apt-config-action">When config files conflict</label>
+          <label for="apt-config-action">When config files conflict (apt/dpkg systems only)</label>
           <select id="apt-config-action">
             <option value="keep" selected>Keep old config (safe default)</option>
             <option value="new">Use new package config</option>
@@ -389,16 +391,16 @@ const indexHTML = `<!DOCTYPE html>
         <div class="field-row">
           <label for="apt-upgrade-type">Upgrade type</label>
           <select id="apt-upgrade-type">
-            <option value="upgrade" selected>upgrade — never removes packages</option>
-            <option value="dist-upgrade">dist-upgrade — may add or remove packages</option>
+            <option value="upgrade" selected>Safe upgrade — never removes packages</option>
+            <option value="dist-upgrade">Full upgrade — may add or remove packages</option>
           </select>
         </div>
       </fieldset>
 
       <div class="toolbar">
-        <button type="button" id="apt-update">1. Update package list</button>
+        <button type="button" id="apt-update">1. Refresh package index</button>
         <button type="button" id="apt-upgrade">2. Upgrade packages</button>
-        <button type="button" id="apt-both">Update + Upgrade</button>
+        <button type="button" id="apt-both">Refresh + Upgrade</button>
         <button type="button" id="apt-cancel" disabled>Cancel / Kill</button>
         <button type="button" id="apt-clear">Clear output</button>
       </div>

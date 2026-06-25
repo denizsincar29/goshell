@@ -216,6 +216,16 @@ func (s *Service) DescribeCronSchedule(e CronEntry) string {
 	return DescribeSchedule(e)
 }
 
+// ---- Package manager ----
+
+func (s *Service) DetectPackageManager() (*sshpkg.PackageManager, error) {
+	c, err := s.getClient()
+	if err != nil {
+		return nil, err
+	}
+	return c.DetectPackageManager()
+}
+
 // ---- Files ----
 
 type DirListing struct {

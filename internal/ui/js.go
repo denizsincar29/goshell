@@ -1128,6 +1128,16 @@ function initAptTab() {
     $('apt-progress-text').textContent = 'Idle';
     $('apt-status').textContent = 'Output cleared';
   });
+  detectAndShowPackageManager();
+}
+
+async function detectAndShowPackageManager() {
+  try {
+    const pm = await call('detect_package_manager');
+    $('apt-pkgmgr-info').textContent = 'Detected package manager: ' + pm.DisplayName;
+  } catch (err) {
+    $('apt-pkgmgr-info').textContent = 'Could not detect a package manager: ' + err.message;
+  }
 }
 
 function setAptBusy(busy) {
@@ -1155,9 +1165,9 @@ function runApt(operation) {
   $('apt-progress').value = 0;
   $('apt-progress-text').textContent = 'Starting ' + operation + '…';
   appendAptOutput(String.fromCharCode(10) + '=== ' + operation + ' ===' + String.fromCharCode(10));
-  announce('Starting apt ' + operation);
+  announce('Starting package ' + operation);
 
-  aptSocket = new WebSocket(wsURL('/ws/apt'));
+  aptSocket = new WebSocket(wsURL('/ws/packages'));
   aptSocket.onopen = function () {
     aptSocket.send(JSON.stringify({ operation: operation, config_action: $('apt-config-action').value }));
   };

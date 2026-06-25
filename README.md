@@ -24,7 +24,7 @@ in JS automatically via `glaze.BindMethods`. No routes, no JSON encode/decode
 boilerplate, no fetch wrapper: the JS bridge handles all of that, and the
 binding's Promise rejects with the Go error directly.
 
-Two things are genuinely *not* request/response — live apt output/progress, and
+Two things are genuinely *not* request/response — live package-update output/progress, and
 the interactive terminal, where stdin keeps flowing while stdout keeps streaming
 in. `Bind` has no server-push primitive (confirmed against glaze's own examples:
 even its REPL example just blocks until the whole result is ready), so those two
@@ -67,12 +67,18 @@ go build -ldflags="-H windowsgui" -o goshell.exe ./cmd/goshell
   manually. Keys are auto-discovered from `~/.ssh/`.
 - **Services**: list/start/stop/restart/enable/disable systemd services, view journal logs,
   with or without sudo.
-- **Crontab**: load/edit/save crontabs for any user (sudo for others).
-- **Files**: browse the remote filesystem, edit files directly over SSH (no scp/sftp —
-  uses base64-safe `cat`/`mv` so encoding never breaks), chmod/chown with optional recursion.
-- **Resources**: live CPU/RAM/swap/disk usage and top processes, with auto-refresh.
-- **Updates**: `apt-get update`/`upgrade`/`dist-upgrade` with a real progress bar, live
-  streamed output, and a config-conflict policy you choose up front (no surprise dpkg prompts).
+- **Crontab**: each scheduled task edits as actual fields (time, days, command) with
+  presets and a live plain-English preview — no hand-typed cron syntax required.
+  A raw text mode stays available for entries the form can't represent.
+- **Files**: a real keyboard-navigable tree (arrow keys, Enter, no flattening on
+  every navigation), with file editing directly over SSH (no scp/sftp — uses
+  base64-safe `cat`/`mv` so encoding never breaks), chmod/chown with optional recursion.
+- **Resources**: live CPU/RAM/swap, plus structured (not dumped-as-text) process and
+  disk usage tables, with auto-refresh.
+- **Updates**: detects the actual package manager in use (apt, dnf, yum, pacman,
+  zypper, or apk — see `internal/ssh/pkgmgr.go`) rather than assuming Debian, and
+  runs its update/upgrade with a real progress bar, live streamed output, and
+  (on apt systems) a config-conflict policy you choose up front.
 - **Terminal**: run arbitrary commands, sudo optional.
 
 All remote operations are plain SSH commands — nothing is installed on the server.

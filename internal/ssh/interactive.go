@@ -20,8 +20,9 @@ type InteractiveSession struct {
 // StartInteractive opens a PTY session and starts the given command.
 // outputCb is called with each chunk of output as it arrives (for live streaming).
 // inputCh can be used to send stdin lines (e.g. "y\n" for prompts).
-// Use DEBIAN_FRONTEND=noninteractive to suppress most apt dialogs,
-// but we still need a PTY for progress bars.
+// Package manager commands are run with their own noninteractive flags
+// (DEBIAN_FRONTEND=noninteractive for apt, -y/--noconfirm for others; see
+// pkgmgr.go), but a PTY is still requested for progress bars and color.
 func (c *Client) StartInteractive(cmd string, outputCb func(string), inputCh <-chan string, doneCh chan<- error) error {
 	sess, err := c.inner.NewSession()
 	if err != nil {
@@ -120,13 +121,21 @@ func (c *Client) StartInteractive(cmd string, outputCb func(string), inputCh <-c
 	return nil
 }
 
-// RunAptUpdate runs apt-get update with live output streaming.
-// Returns error channel that fires when complete.
-func (c *Client) RunAptUpdate(outputCb func(string)) chan error {
+// RunPackageUpdate refreshes the package index using whichever package
+// manager pm represents (apt-get update, dnf check-update, pacman -Sy,
+// etc.) -- see pkgmgr.go for the detection and per-manager command logic.
+// Returns an error channel that fires when complete.
+func (c *Client) RunPackageUpdate(pm PackageManager, outputCb func(string)) chan error {
 	doneCh := make(chan error, 1)
+	inner := pm.updateCommand()
+	if inner == "" {
+		doneCh <- fmt.Errorf("don't know how to update the package index for %s", pm.DisplayName)
+		return doneCh
+	}
 	cmd := fmt.Sprintf(
-		"echo %s | sudo -S bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update 2>&1'",
+		"echo %s | sudo -S bash -c %s",
 		shellescape(c.SudoPass),
+		shellescape(envPrefix(pm)+inner+" 2>&1"),
 	)
 	if err := c.StartInteractive(cmd, outputCb, nil, doneCh); err != nil {
 		doneCh <- err
@@ -134,26 +143,32 @@ func (c *Client) RunAptUpdate(outputCb func(string)) chan error {
 	return doneCh
 }
 
-// RunAptUpgrade runs apt-get upgrade with live output.
-// For config prompts (dpkg asking about config files), we pass --keep-old-files
-// to avoid interactive dialogs. User can choose behavior.
-func (c *Client) RunAptUpgrade(outputCb func(string), configAction string) chan error {
-	doneCh := make(chan error, 1)
-	// configAction: "keep" = keep old configs, "new" = use new, "ask" = show terminal
-	var dpkgOpts string
-	switch configAction {
-	case "new":
-		dpkgOpts = `DPKG_OPTIONS='--force-confnew'`
-	case "keep":
-		dpkgOpts = `DPKG_OPTIONS='--force-confold'`
-	default: // "ask" - use noninteractive with default (keep)
-		dpkgOpts = `DPKG_OPTIONS='--force-confdef --force-confold'`
-	}
+// RunPackageUpgrade runs a "safe" upgrade (no package removal, where the
+// package manager distinguishes that) using whichever manager pm
+// represents. configAction only affects apt's dpkg config-file conflict
+// policy; it's a no-op for other package managers.
+func (c *Client) RunPackageUpgrade(pm PackageManager, outputCb func(string), configAction string) chan error {
+	return c.runPackageUpgrade(pm, outputCb, configAction, false)
+}
 
+// RunPackageFullUpgrade runs the "full" upgrade variant where the package
+// manager has one (apt dist-upgrade, zypper dist-upgrade); for managers
+// with no such distinction it's the same as RunPackageUpgrade.
+func (c *Client) RunPackageFullUpgrade(pm PackageManager, outputCb func(string), configAction string) chan error {
+	return c.runPackageUpgrade(pm, outputCb, configAction, true)
+}
+
+func (c *Client) runPackageUpgrade(pm PackageManager, outputCb func(string), configAction string, full bool) chan error {
+	doneCh := make(chan error, 1)
+	inner := pm.upgradeCommand(configAction, full)
+	if inner == "" {
+		doneCh <- fmt.Errorf("don't know how to upgrade packages for %s", pm.DisplayName)
+		return doneCh
+	}
 	cmd := fmt.Sprintf(
-		"echo %s | sudo -S bash -c 'DEBIAN_FRONTEND=noninteractive %s apt-get upgrade -y 2>&1'",
+		"echo %s | sudo -S bash -c %s",
 		shellescape(c.SudoPass),
-		dpkgOpts,
+		shellescape(envPrefix(pm)+inner+" 2>&1"),
 	)
 	if err := c.StartInteractive(cmd, outputCb, nil, doneCh); err != nil {
 		doneCh <- err
@@ -161,25 +176,12 @@ func (c *Client) RunAptUpgrade(outputCb func(string), configAction string) chan 
 	return doneCh
 }
 
-// RunAptDistUpgrade runs a full dist-upgrade
-func (c *Client) RunAptDistUpgrade(outputCb func(string), configAction string) chan error {
-	doneCh := make(chan error, 1)
-	var dpkgOpts string
-	switch configAction {
-	case "new":
-		dpkgOpts = `DPKG_OPTIONS='--force-confnew'`
-	default:
-		dpkgOpts = `DPKG_OPTIONS='--force-confdef --force-confold'`
+func envPrefix(pm PackageManager) string {
+	env := pm.noninteractiveEnv()
+	if env == "" {
+		return ""
 	}
-	cmd := fmt.Sprintf(
-		"echo %s | sudo -S bash -c 'DEBIAN_FRONTEND=noninteractive %s apt-get dist-upgrade -y 2>&1'",
-		shellescape(c.SudoPass),
-		dpkgOpts,
-	)
-	if err := c.StartInteractive(cmd, outputCb, nil, doneCh); err != nil {
-		doneCh <- err
-	}
-	return doneCh
+	return env + " "
 }
 
 // RunInteractiveShell runs an arbitrary command with full PTY interaction.

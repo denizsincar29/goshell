@@ -28,7 +28,7 @@ func NewMux(svc *Service) *http.ServeMux {
 	mux.HandleFunc("/static/app.js", serveJS)
 	mux.HandleFunc("/static/app.css", serveCSS)
 	mux.HandleFunc("/ws/terminal", wsHandler(svc, handleTerminalWS))
-	mux.HandleFunc("/ws/apt", wsHandler(svc, handleAptWS))
+	mux.HandleFunc("/ws/packages", wsHandler(svc, handlePkgWS))
 	return mux
 }
 
@@ -122,11 +122,13 @@ func handleTerminalWS(conn *websocket.Conn, svc *Service) {
 	conn.WriteMessage(websocket.TextMessage, data)
 }
 
-// ---- WebSocket: APT ----
+// ---- WebSocket: Package updates ----
 // Live progress + output while update/upgrade runs. Same reasoning as the
-// terminal: this is a push stream, not a single request/response.
+// terminal: this is a push stream, not a single request/response. The
+// actual package manager (apt, dnf, pacman, zypper, apk, ...) is detected
+// once per connection rather than assumed -- see internal/ssh/pkgmgr.go.
 
-func handleAptWS(conn *websocket.Conn, svc *Service) {
+func handlePkgWS(conn *websocket.Conn, svc *Service) {
 	_, msgBytes, err := conn.ReadMessage()
 	if err != nil {
 		return
@@ -156,18 +158,25 @@ func handleAptWS(conn *websocket.Conn, svc *Service) {
 	}
 	outputCb := func(text string) { sendMsg("output", text) }
 
+	pm, err := client.DetectPackageManager()
+	if err != nil {
+		sendMsg("done", err.Error())
+		return
+	}
+	sendMsg("output", "Detected package manager: "+pm.DisplayName+"\n")
+
 	run := func(op string) error {
 		var doneCh chan error
 		switch op {
 		case "update":
-			sendProgress(0, "Running apt-get update…")
-			doneCh = client.RunAptUpdate(outputCb)
+			sendProgress(0, "Refreshing package index ("+pm.DisplayName+")…")
+			doneCh = client.RunPackageUpdate(*pm, outputCb)
 		case "upgrade":
-			sendProgress(0, "Running apt-get upgrade…")
-			doneCh = client.RunAptUpgrade(outputCb, req.ConfigAction)
+			sendProgress(0, "Upgrading packages ("+pm.DisplayName+")…")
+			doneCh = client.RunPackageUpgrade(*pm, outputCb, req.ConfigAction)
 		case "dist-upgrade":
-			sendProgress(0, "Running apt-get dist-upgrade…")
-			doneCh = client.RunAptDistUpgrade(outputCb, req.ConfigAction)
+			sendProgress(0, "Running full upgrade ("+pm.DisplayName+")…")
+			doneCh = client.RunPackageFullUpgrade(*pm, outputCb, req.ConfigAction)
 		default:
 			return fmt.Errorf("unknown operation: %s", op)
 		}
@@ -182,12 +191,12 @@ func handleAptWS(conn *websocket.Conn, svc *Service) {
 
 	switch req.Operation {
 	case "update+upgrade":
-		sendMsg("output", "=== Step 1: apt-get update ===\n")
+		sendMsg("output", "=== Step 1: refresh package index ===\n")
 		if err := run("update"); err != nil {
 			sendMsg("done", "update failed: "+err.Error())
 			return
 		}
-		sendMsg("output", "\n=== Step 2: apt-get upgrade ===\n")
+		sendMsg("output", "\n=== Step 2: upgrade packages ===\n")
 		if err := run("upgrade"); err != nil {
 			sendMsg("done", "upgrade failed: "+err.Error())
 			return
