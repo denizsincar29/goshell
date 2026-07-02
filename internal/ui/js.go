@@ -1254,45 +1254,12 @@ function runTerminalCommand() {
 
 // ============== Init ==============
 
-// Returns the element that should receive keyboard focus right now: the
-// currently focused element if there is one and it's still visible/in the
-// document, otherwise a sensible default per screen (first field on the
-// connect screen, the active tab button in a session).
-function defaultFocusTarget() {
-  if (!$('screen-session').hidden) {
-    const activeTab = document.querySelector('.tab-btn[aria-selected="true"]');
-    return activeTab || $('tab-services');
-  }
-  return $('field-hostname');
-}
-
-function refocusContent() {
-  const active = document.activeElement;
-  // If focus already landed somewhere real inside the page, leave it.
-  if (active && active !== document.body && active !== document.documentElement) {
-    return;
-  }
-  const target = defaultFocusTarget();
-  if (target) target.focus();
-}
-
 document.addEventListener('DOMContentLoaded', function () {
   loadConnectScreenData();
+  // Focus the first field so NVDA's browse-mode cursor lands in the page
+  // immediately on startup. Alt-Tab refocusing is now handled natively by
+  // glaze v0.0.29+: WM_SETFOCUS -> MoveFocus on Windows,
+  // gtk_widget_grab_focus on Linux -- no JS workaround needed.
   $('field-hostname').focus();
-
-  // WebView-embedded apps (this one included) can lose keyboard focus on
-  // the actual page content when the OS window is minimized, Alt-Tabbed
-  // away from, and then back -- the top-level window gets OS focus again,
-  // but the document inside the WebView control doesn't automatically
-  // get focus restored to a specific element, which leaves NVDA's
-  // browse-mode cursor with nothing to anchor to until the user clicks.
-  // Re-focusing a sensible default element on these events closes most
-  // of that gap from the JS side; main.go's native SetFocus/grab_focus
-  // call on window-shown handles getting the WebView *control* itself
-  // OS keyboard focus in the first place.
-  window.addEventListener('focus', refocusContent);
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') refocusContent();
-  });
 });
 `
